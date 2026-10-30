@@ -7,8 +7,61 @@ reviews:
     drafts: false
   path_filters:
     - "!Cargo.lock"
+  path_instructions:
+    - path: "crates/bubblebuffer-device-key/src/{lib,ids}.rs"
+      instructions: >-
+        Preserve 80-bit Crockford device IDs and libsodium-compatible X25519 conversion.
+        Reject noncanonical, small-order and torsion public keys.
+        Keep seeds out of Debug output and zeroize derived secrets.
+
+    - path: "crates/bubblebuffer-device-key/src/{keyfile.rs,keyfile/**/*.rs}"
+      instructions: >-
+        Check .bpkey changes against docs/remote.md and the contract vectors.
+        Preserve strict JSON, canonical unpadded base64url, UTF-16 key ordering
+        and authenticated imported ID spelling. Keep private and aead.nonce
+        out of AAD; retain aead.alg and the KDF salt.
+
+    - path: "crates/bubblebuffer-device-key/src/proof.rs"
+      instructions: >-
+        Preserve length-prefixed label/role/origin/nonce/ID/public-key ordering.
+        Sign the SHA-256 transcript digest, not the raw transcript.
+        Require an explicit label, exact origin bytes and ID/key consistency.
+
+    - path: "crates/bubblebuffer-link/src/{frame,tunnel}.rs"
+      instructions: >-
+        Enforce frame bounds before allocation and the 16 MiB message cap.
+        Bind the Ed25519 identity to the Noise static key before calling the
+        PeerAuthorizer; no application data until both sides accept.
+        A failed or cancelled operation must keep invalidating the tunnel.
+
+    - path: "crates/bubblebuffer-link/src/{pairing.rs,pairing/**/*.rs}"
+      instructions: >-
+        Preserve five-minute monotonic expiry and code consumption after a
+        successful PSK proof, before user approval. Recheck expiry at approval.
+        Keep comparison confirmation caller-owned and save the client-side host
+        entry only after the encrypted approval. Never log pairing codes.
+
+    - path: "crates/bubblebuffer-link/src/{store,trust}.rs"
+      instructions: >-
+        Require exact ID/key agreement and atomic validated list replacement.
+        Preserve the 4 MiB store cap, same-directory atomic writes and Unix 0600.
+        After rename, StoreDurability must keep the committed in-memory snapshot.
+        Revocation affects new handshakes, not existing tunnel grants.
+
+    - path: "crates/bubblebuffer-link/src/{relay.rs,relay/**/*.rs,bin/bubblebuffer-relay.rs}"
+      instructions: >-
+        Verify fresh origin-bound bubblebuffer-relay-v1 proofs before RelayAdmission.
+        Keep routing admission separate from end-to-end PeerAuthorizer checks.
+        Preserve bounded WebSockets/queues, session isolation and cancellation cleanup.
+        The plain listener sits behind caller-managed TLS; never log payloads.
+
+    - path: "{Cargo.toml,crates/*/Cargo.toml}"
+      instructions: >-
+        Keep publish = false and the inherited Rust 1.88 / edition 2024 unless
+        release policy changes. bubblebuffer-device-key must stay free of
+        transport dependencies (tokio, snow, websockets); only the link crate
+        depends on it. Keep key-handling crates minimal and zeroize-enabled.
 knowledge_base:
   code_guidelines:
     enabled: true
-    filePatterns:
-      - "docs/**/*.md"
+    filePatterns: []
