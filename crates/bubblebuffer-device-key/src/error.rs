@@ -19,8 +19,6 @@ pub enum DeviceKeyError {
     InvalidEncoding(&'static str),
     InvalidLength(&'static str),
     UnsupportedFormat,
-    /// Imported legacy files must be rewrapped to authenticate the current format before writing.
-    LegacyRewrapRequired,
     UnsupportedVersion,
     UnsupportedType,
     UnsupportedKdf,
@@ -64,10 +62,6 @@ impl fmt::Display for DeviceKeyError {
             Self::UnsupportedFormat => {
                 write!(f, "not a device key file (unknown format)")
             }
-            Self::LegacyRewrapRequired => write!(
-                f,
-                "rewrap the legacy key file before writing the current format"
-            ),
             Self::UnsupportedVersion => write!(
                 f,
                 "unsupported device key file version (this build reads version 1)"

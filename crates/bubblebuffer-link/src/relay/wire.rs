@@ -28,7 +28,7 @@ pub(super) enum Wire {
     Reject,
 }
 
-pub(super) use bubblebuffer_device_key::relay_signed_bytes as signed;
+pub(super) const PROOF_LABEL: &str = "bubblebuffer-relay-v1";
 
 pub(super) fn config(limits: &Limits) -> WebSocketConfig {
     WebSocketConfig::default()

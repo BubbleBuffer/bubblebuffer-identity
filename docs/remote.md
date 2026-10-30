@@ -11,17 +11,22 @@ or enforce permission profiles; the host dispatcher must authorize each request.
 An identity is an Ed25519 seed and its public key. The device ID is the first ten
 bytes of SHA-256 over the raw public key, encoded as sixteen Crockford base32
 characters in four groups, such as `K7MQ-2X9F-D4RT-8WHN`. Parsing accepts ASCII
-letter case, hyphens and Crockford aliases O/0 and I/L/1. The fingerprint is the
-full SHA-256 of the public key, written as lowercase hexadecimal.
+letter case, hyphens and Crockford aliases O/0 and I/L/1; spaces are rejected.
+This 80-bit device ID is the fingerprint; there is no separate full SHA-256
+fingerprint API.
 
 Key-file paths and passphrase acquisition belong to the application. The format
 supports both protected and plain files; callers choose protection explicitly
 using `Some(passphrase)`. Public compatibility vectors live in
 [`fixtures`](../fixtures/README.md).
+The contract fixture contains only `ids`, `keyFiles` and `relayProof` sections.
 
 Version 1 is JSON with `format: "bubblebuffer-device-key"`, `version: 1`,
 `type: "ed25519"`, `id`, `label`, `created`, `public`, `kdf`, `aead` and `private`.
 Public key, salt, nonce and private bytes use canonical unpadded base64url.
+The reader and writer support only `bubblebuffer-device-key`; unknown format
+identifiers return an error. Authenticated metadata uses the stored, validated
+`format` field when constructing AAD.
 
 - Protected: Argon2id v1.3, 65,536 KiB, three passes, one lane, 16-byte salt,
   32-byte output; AES-256-GCM with a 12-byte nonce. `private` contains the encrypted
@@ -108,6 +113,8 @@ characters (50 bits), valid for five minutes on a monotonic clock. The host owns
 the code and serializes attempts through a mutable borrow. Wrong-code attempts
 do not consume it; a successful PSK proof consumes it before user confirmation,
 including a declined or interrupted approval.
+Code entry ignores hyphens and ASCII spaces and accepts ASCII letter case and
+Crockford aliases. This differs from device ID parsing, which rejects spaces.
 
 Pairing uses `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s`. The PSK is Argon2id v1.3
 with 65,536 KiB, three passes, one lane and a 32-byte result. Its password is the
@@ -150,18 +157,43 @@ close any already active sessions it wants to revoke immediately.
 
 ## Relay
 
-Run `bubblebuffer-relay [IP:PORT]` (default `127.0.0.1:8787`). This plain WebSocket
+The caller supplies an explicit relay origin, and possession proofs bind that
+origin and a fresh nonce to the device identity to prevent replay across origins
+or challenges. `RelayAdmission` authorizes routing targets; the host's
+`PeerAuthorizer` and end-to-end Noise authentication decide host access, without
+a separate target-binding signature. The relay forwards ciphertext and can
+observe metadata or interrupt traffic, while the application enforces each
+tunnel's granted profile.
+
+Run `bubblebuffer-relay ORIGIN [IP:PORT]` (default listen address
+`127.0.0.1:8787`), for example:
+
+```sh
+bubblebuffer-relay https://relay.example.test 127.0.0.1:8787
+```
+
+This plain WebSocket
 listener is intended behind Caddy's TLS endpoint. Host/client APIs support
 `wss://` with native root certificates. TLS termination does not decrypt Noise.
 Configuration and limits are exposed by `RelayConfig` and `Limits`. A `Relay`
 owns its connection tasks; `shutdown().await` closes and joins them. Ctrl-C
 shuts down the binary. The library owns no operating-system background process.
+Construct server configuration with `RelayConfig::new(origin)`; mounted routes
+use `RelayRouter::new(RelayConfig::new(origin))`. Every client API requires the
+same nonempty origin string explicitly, including caller-created sockets; it is
+compared as exact UTF-8 bytes, without URL derivation or normalization.
 
-Every connection receives a fresh random 32-byte challenge. The device signs
-`"bubblebuffer-relay-v1\0" || challenge || role_byte || target_ID_UTF8` with
-Ed25519. The domain separator ends in one NUL byte. The signature binds the
-role and target, is checked strictly, and cannot be replayed against a new
-challenge. A registration ID is derived from its authenticated public key.
+Every connection receives a fresh random 32-byte challenge. The generic
+device-key proof requires an explicit protocol label. Its transcript is the
+ordered sequence of label, role, origin, nonce, canonical device ID and public
+key, each prefixed by its byte length as an unsigned 32-bit big-endian integer.
+Strings use UTF-8 (`host` or `viewer` for the role); nonce and public key use raw
+bytes. `relay_proof_bytes` constructs the transcript and `relay_proof_hash`
+returns its SHA-256 digest.
+The device signs SHA-256 of this transcript with Ed25519. The link relay supplies
+`bubblebuffer-relay-v1` as its label. Verification binds all fields and rejects a
+proof replayed against a fresh challenge. A registration ID is derived from its
+authenticated public key.
 Relay protocol compatibility and key-file compatibility are separate contracts.
 
 `RelayAdmission` is the policy hook after mandatory device-key proof verification.
@@ -180,6 +212,8 @@ relay messages cannot set this context. No OAuth implementation or credentials
 are stored in this crate. `register_socket` and `connect_socket` also accept
 caller-created client WebSockets, allowing the embedder to supply authentication
 headers/cookies at upgrade without putting credentials in URLs.
+Their signatures are `register_socket(socket, origin, key, limits)` and
+`connect_socket(socket, origin, key, target, limits)`.
 
 The router applies common routing and connection limits to all these sockets and
 rejects sockets whose frame/message configuration lacks the required bounds.
@@ -206,12 +240,33 @@ One binary WebSocket message is one relay frame. Integers are unsigned big-endia
 | 9 | Connected | 8-byte session ID, 32-byte host public key |
 | 10 | Reject | empty |
 
-`register(url, key, limits)` returns a `Host`. Its `accept()` returns independent
-`RelaySession`s over the same registration. `connect(url, key, target, limits)`
+`register(url, origin, key, limits)` returns a `Host`. Its `accept()` returns
+independent `RelaySession`s over the same registration.
+`connect(url, origin, key, target, limits)`
 waits for the host to accept. Each session runs its own Noise handshake and
 nonce sequence. The relay's authenticated identity is a routing hint: the host
 and client still verify their paired static keys end to end. Session IDs cannot
 address another client's stream. Duplicate host registrations are rejected.
+
+For example, the host registers and waits for a session:
+
+```rust,ignore
+let origin = "https://relay.example.test";
+let url = "wss://relay.example.test/transport";
+let mut host = register(url, origin, &host_key, Limits::default()).await?;
+let session = host.accept().await?;
+```
+
+The client connects with the same origin and the intended host ID:
+
+```rust,ignore
+let origin = "https://relay.example.test";
+let url = "wss://relay.example.test/transport";
+let session = connect(url, origin, &client_key, &host_key.id(), Limits::default()).await?;
+```
+
+The URL selects the endpoint; the origin is the separately configured proof
+audience and must match the server even behind a reverse proxy.
 
 Defaults: 65,535 data bytes, 120-second idle timeout, 32 connections per source
 IP, 16 pending clients and 128 total sessions per host, and bounded queues of 16.

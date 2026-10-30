@@ -1,3 +1,6 @@
+const ORIGIN: &str = "https://relay.example.test";
+
+use bubblebuffer_device_key::{RelayRole, relay_proof_hash};
 use bubblebuffer_link::{
     device::DeviceKey,
     frame::FrameIo,
@@ -29,14 +32,14 @@ async fn two_clients_exchange_independent_encrypted_messages_through_one_registr
         ciphertext_observer: Some(Arc::new(move |bytes| {
             capture.lock().unwrap().push(bytes.to_vec())
         })),
-        ..Default::default()
+        ..RelayConfig::new(ORIGIN)
     })
     .await;
     let url = format!("ws://{}", relay.local_addr());
     let host_key = key(1);
     let host_id = host_key.id();
     let limits = Limits::default();
-    let mut host = relay::register(&url, &host_key, limits.clone())
+    let mut host = relay::register(&url, ORIGIN, &host_key, limits.clone())
         .await
         .unwrap();
     let first_marker = b"PRIVATE CLIENT ONE MESSAGE";
@@ -46,7 +49,7 @@ async fn two_clients_exchange_independent_encrypted_messages_through_one_registr
     let clients = async {
         let one = async {
             let client_key = key(2);
-            let io = relay::connect(&url, &client_key, &host_id, limits.clone())
+            let io = relay::connect(&url, ORIGIN, &client_key, &host_id, limits.clone())
                 .await
                 .unwrap();
             let mut encrypted = tunnel::connect(io, &client_key, &[host_key.public_key()])
@@ -57,7 +60,7 @@ async fn two_clients_exchange_independent_encrypted_messages_through_one_registr
         };
         let two = async {
             let client_key = key(3);
-            let io = relay::connect(&url, &client_key, &host_id, limits.clone())
+            let io = relay::connect(&url, ORIGIN, &client_key, &host_id, limits.clone())
                 .await
                 .unwrap();
             let mut encrypted = tunnel::connect(io, &client_key, &[host_key.public_key()])
@@ -119,10 +122,19 @@ async fn socket(url: &str) -> (Socket, Vec<u8>) {
 }
 
 async fn auth(socket: &mut Socket, challenge: &[u8], key: &DeviceKey, role: u8, target: &str) {
-    let mut signed = b"bubblebuffer-relay-v1\0".to_vec();
-    signed.extend_from_slice(challenge);
-    signed.push(role);
-    signed.extend_from_slice(target.as_bytes());
+    let signed = relay_proof_hash(
+        "bubblebuffer-relay-v1",
+        if role == 2 {
+            RelayRole::Host
+        } else {
+            RelayRole::Viewer
+        },
+        ORIGIN,
+        &challenge.try_into().unwrap(),
+        key.id(),
+        &key.public_key(),
+    )
+    .unwrap();
     let mut frame = vec![role];
     frame.extend_from_slice(&key.public_key());
     frame.extend_from_slice(&key.sign(&signed));
@@ -143,11 +155,11 @@ async fn opcode(socket: &mut Socket) -> u8 {
 async fn pending_limit_releases_on_disconnect_and_registration_releases_on_shutdown() {
     let limits = Limits {
         pending_per_host: 1,
-        ..Default::default()
+        ..Limits::default()
     };
     let relay = start(RelayConfig {
         limits,
-        ..Default::default()
+        ..RelayConfig::new(ORIGIN)
     })
     .await;
     let url = format!("ws://{}", relay.local_addr());
@@ -178,7 +190,7 @@ async fn pending_limit_releases_on_disconnect_and_registration_releases_on_shutd
 
 #[tokio::test]
 async fn challenge_cannot_be_replayed_on_another_connection() {
-    let relay = start(RelayConfig::default()).await;
+    let relay = start(RelayConfig::new(ORIGIN)).await;
     let url = format!("ws://{}", relay.local_addr());
     let (_first, old_challenge) = socket(&url).await;
     let (mut second, fresh_challenge) = socket(&url).await;
@@ -197,11 +209,11 @@ async fn challenge_cannot_be_replayed_on_another_connection() {
 async fn idle_and_oversized_connections_are_closed() {
     let limits = Limits {
         idle_timeout: Duration::from_millis(150),
-        ..Default::default()
+        ..Limits::default()
     };
     let relay = start(RelayConfig {
         limits: limits.clone(),
-        ..Default::default()
+        ..RelayConfig::new(ORIGIN)
     })
     .await;
     let url = format!("ws://{}", relay.local_addr());
@@ -230,17 +242,17 @@ async fn idle_and_oversized_connections_are_closed() {
 
 #[tokio::test]
 async fn public_session_rejects_oversized_frames_before_queueing() {
-    let relay = start(RelayConfig::default()).await;
+    let relay = start(RelayConfig::new(ORIGIN)).await;
     let url = format!("ws://{}", relay.local_addr());
     let host_key = key(10);
-    let mut host = relay::register(&url, &host_key, Limits::default())
+    let mut host = relay::register(&url, ORIGIN, &host_key, Limits::default())
         .await
         .unwrap();
     let client_key = key(11);
     let host_id = host_key.id();
     let (accepted, connected) = tokio::join!(
         host.accept(),
-        relay::connect(&url, &client_key, &host_id, Limits::default())
+        relay::connect(&url, ORIGIN, &client_key, &host_id, Limits::default())
     );
     let mut accepted = accepted.unwrap();
     let connected = connected.unwrap();
@@ -252,4 +264,151 @@ async fn public_session_rejects_oversized_frames_before_queueing() {
     drop(accepted);
     drop(host);
     relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn wrong_origins_and_wrong_signed_roles_fail_before_admission() {
+    use bubblebuffer_link::relay::{RelayAdmission, RelayProof};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountAdmission(Arc<AtomicUsize>);
+    impl RelayAdmission for CountAdmission {
+        fn admit_host(&self, _: &bubblebuffer_link::device::DeviceId, proof: &RelayProof) -> bool {
+            assert_eq!(proof.origin, ORIGIN);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        fn admit_client(&self, _: &bubblebuffer_link::device::DeviceId, _: &RelayProof) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let relay = start(RelayConfig {
+        admission: Arc::new(CountAdmission(calls.clone())),
+        ..RelayConfig::new(ORIGIN)
+    })
+    .await;
+    let url = format!("ws://{}", relay.local_addr());
+    let host_key = key(51);
+    // Origin is exact protocol context, never inferred from the connection URL.
+    for origin in ["https://other.example.test", "https://relay.example.test/"] {
+        assert!(
+            relay::register(&url, origin, &host_key, Limits::default())
+                .await
+                .is_err()
+        );
+        let (ws, _) = tokio_tungstenite::connect_async_with_config(
+            &url,
+            Some(Limits::default().websocket_config()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            relay::register_socket(ws, origin, &host_key, Limits::default())
+                .await
+                .is_err()
+        );
+    }
+    let (mut ws, nonce) = socket(&url).await;
+    // A valid host signature cannot be relabeled as a viewer connection.
+    let hash = relay_proof_hash(
+        "bubblebuffer-relay-v1",
+        RelayRole::Host,
+        ORIGIN,
+        &nonce.try_into().unwrap(),
+        host_key.id(),
+        &host_key.public_key(),
+    )
+    .unwrap();
+    let mut frame = vec![3];
+    frame.extend_from_slice(&host_key.public_key());
+    frame.extend_from_slice(&host_key.sign(&hash));
+    frame.extend_from_slice(key(52).id().to_string().as_bytes());
+    ws.send(Message::Binary(frame.into())).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .unwrap()
+            .is_none_or(|result| result.is_err() || matches!(result, Ok(Message::Close(_))))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let host = relay::register(&url, ORIGIN, &host_key, Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let client_key = key(53);
+    assert!(
+        relay::connect(
+            &url,
+            "wrong-origin",
+            &client_key,
+            &host_key.id(),
+            Limits::default()
+        )
+        .await
+        .is_err()
+    );
+    let (ws, _) = tokio_tungstenite::connect_async_with_config(
+        &url,
+        Some(Limits::default().websocket_config()),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        relay::connect_socket(
+            ws,
+            "wrong-origin",
+            &client_key,
+            &host_key.id(),
+            Limits::default()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(host);
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn empty_origin_is_rejected_by_server_and_every_client_entrypoint() {
+    use bubblebuffer_link::{Error, relay::RelayRouter};
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+    assert!(matches!(
+        RelayRouter::new(RelayConfig::new("")),
+        Err(Error::Protocol(_))
+    ));
+    let key = key(61);
+    assert!(matches!(
+        relay::register("invalid-url", "", &key, Limits::default()).await,
+        Err(Error::Protocol(_))
+    ));
+    assert!(matches!(
+        relay::connect("invalid-url", "", &key, &key.id(), Limits::default()).await,
+        Err(Error::Protocol(_))
+    ));
+    let (io, _peer) = tokio::io::duplex(1024);
+    let ws = WebSocketStream::from_raw_socket(
+        io,
+        Role::Client,
+        Some(Limits::default().websocket_config()),
+    )
+    .await;
+    assert!(matches!(
+        relay::register_socket(ws, "", &key, Limits::default()).await,
+        Err(Error::Protocol(_))
+    ));
+    let (io, _peer) = tokio::io::duplex(1024);
+    let ws = WebSocketStream::from_raw_socket(
+        io,
+        Role::Client,
+        Some(Limits::default().websocket_config()),
+    )
+    .await;
+    assert!(matches!(
+        relay::connect_socket(ws, "", &key, &key.id(), Limits::default()).await,
+        Err(Error::Protocol(_))
+    ));
 }

@@ -1,26 +1,15 @@
 # Device identity contract fixtures
 
-`device-keys-contract.json` contains public deterministic test data. Every seed,
-passphrase, salt, nonce and derived secret is deliberately public and must never
-be used for a real identity.
+`device-keys-contract.json` has exactly three sections: `ids`, `keyFiles` and
+`relayProof`. Every seed, passphrase, salt, nonce and derived secret is public
+deterministic test data. Never use this material for a real identity.
 
-The original contract was extracted from the release source's remote device
-module. All original sections and non-format inputs remain present. The current
-key-file identifier is `bubblebuffer-device-key`; changing that authenticated
-header requires regenerating its canonical AAD and AES-GCM ciphertext/tag.
-Wrong-passphrase and tampered-label failure vectors retain their deliberate
-corruption and use the newly sealed ciphertext.
-
-The historical `handshake` and `relayProof` sections are opaque compatibility
-records retained unchanged. They describe an earlier protocol, not the current
-Noise transport or binary relay possession proof. `relayPossession` contains
-current binary challenge transcripts and signatures.
-
-The `keyFiles.legacy` vector uses the neutral identifier `legacy-device-key-v1`.
-The key-file reader accepts legacy identifiers only when its caller supplies
-them through `parse_with_legacy_formats`. Unlock authenticates the exact stored
-identifier. `to_json` refuses legacy files with `LegacyRewrapRequired`; `rewrap`
-unlocks and recreates protection under the current identifier before writing.
+The key-file inputs retain the original seeds, labels, created timestamps,
+passphrases, salts, nonces and fixed protection parameters. The current format
+is `bubblebuffer-device-key`; its canonical AAD and AES-GCM authentication tag
+are regenerated for that identifier. The reader and writer accept only this
+format. Wrong-passphrase and tampered-label vectors retain their deliberate
+corruption and use the valid protected file's newly sealed ciphertext.
 
 On an authorized build host, regenerate with:
 
@@ -30,44 +19,48 @@ cp /tmp/device-keys-contract.json fixtures/device-keys-contract.json
 cargo run --quiet -p bubblebuffer-device-key --example generate_contract -- --check
 ```
 
-The generator reads deterministic inputs from the checked-in fixture, recomputes
-key-file KDF/AAD/ciphertext and current possession proof outputs, and emits JSON
-to stdout. It preserves historical sections and unrelated field values. `--check`
-compares the entire generated document byte for byte. Review any regenerated
-diff. Never redirect directly onto the input fixture: compilation embeds it.
-
-Unit tests separately validate strict JSON, canonical encodings, identity
-consistency, deterministic sealing, authenticated metadata, protected failures,
-fresh random protection, legacy migration and possession proof field binding.
+The generator reads deterministic identity seeds and key-file inputs from the
+fixture, recomputes their derived outputs and creates the proof vectors from
+explicit label/role/origin/nonce inputs. It emits JSON to stdout; `--check`
+compares the complete generated document byte for byte. Review regenerated
+diffs. Never redirect directly onto the input fixture: compilation embeds it.
 
 For an implementation in another language, consume the JSON directly:
 
-- Decode binary strings as canonical, unpadded base64url unless the field name
-  ends in `Hex`; decode those as hexadecimal. `aadUtf8` and `plaintextUtf8` are
-  exact UTF-8 strings. Preserve their Unicode values, quoting and control escapes
-  when deriving bytes; canonical JSON uses UTF-16 property-name ordering.
+- Binary strings use canonical, unpadded base64url unless their field name ends
+  in `Hex`, in which case they use hexadecimal. `aadUtf8` is an exact UTF-8
+  string; compare its bytes without Unicode normalization.
 - For each `ids` entry, derive the Ed25519 public key from `seedHex`, hash its raw
-  32 bytes with SHA-256 and compare `public`, `sha256Hex` and the 80-bit Crockford
-  ID. Also check the supplied alias spelling normalizes to the expected ID.
+  32 bytes with SHA-256 and compare `public` and `sha256Hex`. The identity's
+  fingerprint is the first ten hash bytes, encoded with Crockford base32 as four
+  groups of four symbols. Compare `id` and check supplied ID aliases normalize
+  to the expected canonical spelling.
 - For `keyFiles.plain`, validate seed, public key and ID consistency. For
-  `keyFiles.passphrase`, derive Argon2id v1.3 with the stored salt, 65,536 KiB,
+  `keyFiles.passphrase`, derive Argon2id v1.3 using the stored salt, 65,536 KiB,
   three passes, one lane and 32 output bytes; compare `kdfKeyHex`. Canonicalize
-  the header excluding `private` and `aead.nonce`, compare both AAD fields, then
-  AES-256-GCM seal `seedHex` with that AAD and the stored nonce. Compare the
-  complete ciphertext plus 16-byte tag against `file.private`, and decrypt back
-  to the seed. A JSON round trip alone does not establish byte compatibility.
-- Require both `keyFiles.failures` entries to fail authentication. Accept
-  `keyFiles.legacy` only after explicitly enabling its neutral format, and verify
-  its AAD and successful decryption using that stored format. Changing only the
-  format to the current value must fail authentication; migration must unlock
-  and reseal with fresh salt and nonce under the current format.
-- For `relayPossession.vectors`, construct domain bytes
-  `bubblebuffer-relay-v1` followed by a zero byte, the 32-byte challenge, the
-  one-byte role and exact UTF-8 target spelling. Compare `signedBytesHex`, its
-  SHA-256 and the Ed25519 signature. Verify the signature, then require role 2
-  to have an empty target or role 3 to have a valid target ID. Altering challenge,
-  role, target or public key must invalidate the proof.
+  the header excluding `private` and `aead.nonce`, sorting property names by
+  UTF-16 code units and minimally escaping strings. Compare `aadUtf8` and
+  `aadHex`, then AES-256-GCM seal `seedHex` with that AAD and the stored nonce.
+  Compare the entire ciphertext plus 16-byte tag with `file.private` and decrypt
+  back to the seed. A JSON round trip alone does not prove byte compatibility.
+- Require both `keyFiles.failures` entries to fail authentication. Reject an
+  unsupported format before unlocking. Rewrapping retains identity, label and
+  timestamp, supports optional passphrase protection, and generates fresh salt
+  and nonce for protected output.
+- For `relayProof.vectors`, prefix each of these fields with its byte length as
+  an unsigned big-endian 32-bit integer: `label`, `role`, `origin`, raw 32-byte
+  nonce, canonical `id`, raw 32-byte public key. Strings use UTF-8; role is exactly
+  `host` or `viewer`. Compare the concatenated bytes with `encodingHex`, then
+  SHA-256 them and compare `sha256Hex`. The Ed25519 signature authenticates those
+  32 hash bytes. Validate ID/public-key consistency before accepting the proof.
+- Accept the valid proof vectors, including `alternate-label`, which uses the
+  independent label `independent-project-proof-v2`. Require `wrong-origin` to
+  fail: it retains the host signature while changing the origin. Changing label,
+  role, origin, nonce, ID or public key must also fail. Labels are required caller
+  inputs; the API supplies no default. Origins are authenticated exactly as
+  supplied, with no URL normalization.
 
-The retained historical sections are reference data for implementations of
-those earlier protocols; their presence does not imply support by the current
-Rust crates. All positive, negative and legacy inputs remain public test data.
+The unit tests cover strict JSON and encodings, imported ID spelling, stable
+serialization, deterministic sealing, protected failures, fresh protection,
+RFC 8032 signing, libsodium-compatible key conversion, torsion rejection and
+proof field binding. These fixtures exercise no storage or network operations.

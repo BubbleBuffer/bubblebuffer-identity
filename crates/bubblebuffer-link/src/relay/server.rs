@@ -12,14 +12,17 @@ pub type CiphertextObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RelayConfig {
+    /// Exact caller-selected relay origin bound into each possession proof.
+    pub origin: String,
     pub limits: Limits,
     pub ciphertext_observer: Option<CiphertextObserver>,
     pub admission: Arc<dyn RelayAdmission>,
 }
 
-impl Default for RelayConfig {
-    fn default() -> Self {
+impl RelayConfig {
+    pub fn new(origin: impl Into<String>) -> Self {
         Self {
+            origin: origin.into(),
             limits: Limits::default(),
             ciphertext_observer: None,
             admission: Arc::new(PermissiveAdmission),

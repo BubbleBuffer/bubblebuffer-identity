@@ -48,7 +48,7 @@ const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 /// A parsed or created key file. Immutable; the seed is only ever unlocked into a caller-owned
 /// `SigningKey`. A plain file stores the seed itself, which is why `to_json` on one is secret.
 pub struct KeyFile {
-    // Authenticate imported legacy formats exactly as stored, until rewrapped.
+    // Authenticate the validated format exactly as stored.
     format: String,
     id: DeviceId,
     // Preserve imported spelling: JCS authenticates string values without normalizing IDs.
@@ -100,22 +100,12 @@ impl KeyFile {
     /// Parses and validates a key file. Protected files get structural and public-to-ID checks
     /// here; `unlock` adds decryption and seed-to-public-to-ID validation.
     pub fn parse(text: &str) -> Result<Self, DeviceKeyError> {
-        Self::parse_with_legacy_formats(text, &[])
-    }
-
-    /// Accepts the current format plus caller-selected legacy identifiers. The stored format
-    /// is retained for authenticated metadata. Rewrap before serialization to migrate the
-    /// authenticated header to the current format. No legacy names are built in.
-    pub fn parse_with_legacy_formats(
-        text: &str,
-        legacy_formats: &[&str],
-    ) -> Result<Self, DeviceKeyError> {
         let mut entries = match parse_document(text)? {
             Json::Object(entries) => entries,
             _ => return Err(DeviceKeyError::Malformed("key file must be a JSON object")),
         };
         let format = take_str(&mut entries, "format", "format")?;
-        if format.as_str() != FORMAT && !legacy_formats.contains(&format.as_str()) {
+        if format.as_str() != FORMAT {
             return Err(DeviceKeyError::UnsupportedFormat);
         }
         match take(&mut entries, "version", "version")? {
@@ -211,12 +201,8 @@ impl KeyFile {
     }
 
     /// Stable serialization: fixed field order, two-space indentation, no trailing newline.
-    /// The output contains `private` as stored: the seed for plain files. Imported legacy
-    /// files must first be rewrapped so the authenticated header uses the current format.
+    /// The output contains `private` as stored: the seed for plain files.
     pub fn to_json(&self) -> Result<String, DeviceKeyError> {
-        if self.format != FORMAT {
-            return Err(DeviceKeyError::LegacyRewrapRequired);
-        }
         let (kdf, aead, private) = match &self.protection {
             Protection::Plain { seed } => {
                 (Json::Null, Json::Null, URL_SAFE_NO_PAD.encode(&seed[..]))

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+repository.workspace = true
 description = "Pairing, encrypted device links and a metadata-only relay"
 
 [dependencies]

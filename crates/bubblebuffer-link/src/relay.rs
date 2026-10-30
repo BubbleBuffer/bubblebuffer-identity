@@ -56,3 +56,12 @@ impl Limits {
         Ok(())
     }
 }
+
+// Origins are explicit protocol context. Keep the caller's exact bytes; URL
+// parsing or normalization belongs to the application that selects this value.
+fn validate_origin(origin: &str) -> crate::Result<()> {
+    if origin.is_empty() {
+        return Err(crate::Error::Protocol("relay origin must not be empty"));
+    }
+    Ok(())
+}

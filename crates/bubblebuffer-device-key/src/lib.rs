@@ -1,12 +1,13 @@
 //! Portable Ed25519 identities, strict protected key files and relay possession proofs.
 //! This crate performs no storage, network, clock or account-policy operations.
+#![forbid(unsafe_code)]
 
 use std::fmt;
 
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::{OsRng, RngCore};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha512};
 use zeroize::Zeroizing;
 
 mod error;
@@ -17,7 +18,7 @@ mod proof;
 pub use error::DeviceKeyError;
 pub use ids::DeviceId;
 pub use keyfile::{FORMAT, KeyFile};
-pub use proof::{RelayProof, RelayRole, relay_signed_bytes};
+pub use proof::{RelayProof, RelayRole, relay_proof_bytes, relay_proof_hash};
 
 /// An Ed25519 device identity. Secret material is zeroized by `SigningKey` on drop.
 pub struct DeviceKey(SigningKey);
@@ -41,14 +42,6 @@ impl DeviceKey {
 
     pub fn id(&self) -> DeviceId {
         DeviceId::from_public_key(&self.public_key())
-    }
-
-    /// Full SHA-256 of the Ed25519 public key, as lowercase hexadecimal.
-    pub fn fingerprint(&self) -> String {
-        Sha256::digest(self.public_key())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {

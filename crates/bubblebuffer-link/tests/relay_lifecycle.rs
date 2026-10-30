@@ -1,3 +1,5 @@
+const ORIGIN: &str = "https://relay.example.test";
+
 use bubblebuffer_link::{
     device::DeviceKey,
     frame::FrameIo,
@@ -14,9 +16,9 @@ async fn per_ip_connection_cap_is_enforced_and_released_after_disconnect() {
         RelayConfig {
             limits: Limits {
                 connections_per_ip: 1,
-                ..Default::default()
+                ..Limits::default()
             },
-            ..Default::default()
+            ..RelayConfig::new(ORIGIN)
         },
     )
     .await
@@ -42,7 +44,7 @@ async fn per_ip_connection_cap_is_enforced_and_released_after_disconnect() {
 
 #[tokio::test]
 async fn stale_data_after_client_disconnect_preserves_another_live_tunnel() {
-    let relay = Relay::bind("127.0.0.1:0".parse().unwrap(), RelayConfig::default())
+    let relay = Relay::bind("127.0.0.1:0".parse().unwrap(), RelayConfig::new(ORIGIN))
         .await
         .unwrap();
     let url = format!("ws://{}", relay.local_addr());
@@ -50,18 +52,18 @@ async fn stale_data_after_client_disconnect_preserves_another_live_tunnel() {
     let departed_key = DeviceKey::from_seed(&[32; 32]);
     let live_key = DeviceKey::from_seed(&[33; 32]);
     let target = host_key.id();
-    let mut host = relay::register(&url, &host_key, Limits::default())
+    let mut host = relay::register(&url, ORIGIN, &host_key, Limits::default())
         .await
         .unwrap();
     let (departed_host, departed_client) = tokio::join!(
         host.accept(),
-        relay::connect(&url, &departed_key, &target, Limits::default())
+        relay::connect(&url, ORIGIN, &departed_key, &target, Limits::default())
     );
     let mut departed_host = departed_host.unwrap();
     let departed_client = departed_client.unwrap();
     let (live_host, live_client) = tokio::join!(
         host.accept(),
-        relay::connect(&url, &live_key, &target, Limits::default())
+        relay::connect(&url, ORIGIN, &live_key, &target, Limits::default())
     );
     let host_trusted = [live_key.public_key()];
     let client_trusted = [host_key.public_key()];

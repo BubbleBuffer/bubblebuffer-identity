@@ -6,13 +6,14 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use bubblebuffer_device_key::{DeviceId, DeviceKey, relay_signed_bytes};
+use bubblebuffer_device_key::{
+    DeviceId, DeviceKey, RelayRole, relay_proof_bytes, relay_proof_hash,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const INPUT: &str = include_str!("../../../fixtures/device-keys-contract.json");
 const FORMAT: &str = "bubblebuffer-device-key";
-const LEGACY: &str = "legacy-device-key-v1";
 
 fn text(value: &Value) -> &str {
     value.as_str().expect("fixture string")
@@ -86,9 +87,36 @@ fn seal(vector: &mut Value, format: &str) {
 }
 
 fn generate() -> String {
-    let mut fixture: Value = serde_json::from_str(INPUT).unwrap();
-    // Preserve all historical sections and all input fields. Only the format-dependent key
-    // file outputs change; historical protocol vectors are opaque compatibility records.
+    let input: Value = serde_json::from_str(INPUT).unwrap();
+    let mut fixture = json!({
+        "ids": input["ids"],
+        "keyFiles": {
+            "plain": input["keyFiles"]["plain"],
+            "passphrase": input["keyFiles"]["passphrase"],
+            "failures": input["keyFiles"]["failures"]
+        }
+    });
+    for vector in fixture["ids"].as_array_mut().unwrap() {
+        let seed: [u8; 32] = unhex(text(&vector["seedHex"])).try_into().unwrap();
+        let key = DeviceKey::from_seed(&seed);
+        vector["public"] = json!(URL_SAFE_NO_PAD.encode(key.public_key()));
+        vector["sha256Hex"] = json!(hex(&Sha256::digest(key.public_key())));
+        vector["id"] = json!(key.id().to_string());
+        if vector.get("parse").is_some() {
+            let parsed = DeviceId::parse(text(&vector["parse"]["input"])).unwrap();
+            vector["parse"]["canonical"] = json!(parsed.to_string());
+        }
+    }
+    for name in ["plain", "passphrase"] {
+        let vector = &mut fixture["keyFiles"][name];
+        let seed: [u8; 32] = unhex(text(&vector["seedHex"])).try_into().unwrap();
+        let key = DeviceKey::from_seed(&seed);
+        vector["file"]["public"] = json!(URL_SAFE_NO_PAD.encode(key.public_key()));
+        vector["file"]["id"] = json!(key.id().to_string());
+        if name == "plain" {
+            vector["file"]["private"] = json!(URL_SAFE_NO_PAD.encode(seed));
+        }
+    }
     fixture["keyFiles"]["plain"]["file"]["format"] = json!(FORMAT);
     seal(&mut fixture["keyFiles"]["passphrase"], FORMAT);
     let private = fixture["keyFiles"]["passphrase"]["file"]["private"].clone();
@@ -98,30 +126,70 @@ fn generate() -> String {
         // original file's ciphertext, so they remain authentication failures after migration.
         failure["file"]["private"] = private.clone();
     }
-    let mut legacy = fixture["keyFiles"]["passphrase"].clone();
-    seal(&mut legacy, LEGACY);
-    fixture["keyFiles"]["legacy"] = legacy;
-
     let mut proofs = Vec::new();
-    for (role, name, target) in [
-        (2, "host", String::new()),
-        (3, "client", text(&fixture["ids"][1]["id"]).to_owned()),
+    for (label, role, name, identity, nonce_start) in [
+        ("bubblebuffer-relay-v1", RelayRole::Host, "host", 1, 0xa0_u8),
+        (
+            "bubblebuffer-relay-v1",
+            RelayRole::Viewer,
+            "viewer",
+            0,
+            0xc0_u8,
+        ),
+        (
+            "independent-project-proof-v2",
+            RelayRole::Host,
+            "alternate-label",
+            1,
+            0xa0_u8,
+        ),
     ] {
-        let seed: [u8; 32] = unhex(text(&fixture["ids"][0]["seedHex"]))
+        let seed: [u8; 32] = unhex(text(&fixture["ids"][identity]["seedHex"]))
             .try_into()
             .unwrap();
         let key = DeviceKey::from_seed(&seed);
-        let challenge = [0x42; 32];
-        let signed = relay_signed_bytes(&challenge, role, &target);
+        let nonce = std::array::from_fn(|index| nonce_start + index as u8);
+        let origin = "https://example.test";
+        let encoded =
+            relay_proof_bytes(label, role, origin, &nonce, key.id(), &key.public_key()).unwrap();
+        let hash =
+            relay_proof_hash(label, role, origin, &nonce, key.id(), &key.public_key()).unwrap();
         proofs.push(json!({
-            "name": name, "role": role, "target": target,
-            "challengeHex": hex(&challenge), "public": URL_SAFE_NO_PAD.encode(key.public_key()),
-            "signedBytesHex": hex(&signed), "sha256Hex": hex(&Sha256::digest(&signed)),
-            "signature": URL_SAFE_NO_PAD.encode(key.sign(&signed)), "expected": "valid"
+            "name": name, "label": label, "role": role.as_str(), "origin": origin,
+            "nonceHex": hex(&nonce), "nonce": URL_SAFE_NO_PAD.encode(nonce),
+            "id": key.id().to_string(), "public": URL_SAFE_NO_PAD.encode(key.public_key()),
+            "encodingHex": hex(&encoded), "sha256Hex": hex(&hash),
+            "signature": URL_SAFE_NO_PAD.encode(key.sign(&hash)), "expected": "valid"
         }));
-        assert_eq!(key.id(), DeviceId::from_public_key(&key.public_key()));
     }
-    fixture["relayPossession"] = json!({"vectors": proofs});
+    // An invalid vector retains the valid host's signature but changes the origin.
+    let mut wrong_origin = proofs[0].clone();
+    wrong_origin["name"] = json!("wrong-origin");
+    wrong_origin["origin"] = json!("https://other-relay.example.test");
+    wrong_origin["expected"] = json!("invalid");
+    let nonce = decode(&wrong_origin["nonce"]).try_into().unwrap();
+    let public = decode(&wrong_origin["public"]).try_into().unwrap();
+    let id = DeviceId::parse(text(&wrong_origin["id"])).unwrap();
+    wrong_origin["encodingHex"] = json!(hex(&relay_proof_bytes(
+        text(&wrong_origin["label"]),
+        RelayRole::Host,
+        text(&wrong_origin["origin"]),
+        &nonce,
+        id,
+        &public
+    )
+    .unwrap()));
+    wrong_origin["sha256Hex"] = json!(hex(&relay_proof_hash(
+        text(&wrong_origin["label"]),
+        RelayRole::Host,
+        text(&wrong_origin["origin"]),
+        &nonce,
+        id,
+        &public
+    )
+    .unwrap()));
+    proofs.push(wrong_origin);
+    fixture["relayProof"] = json!({"vectors": proofs});
     serde_json::to_string_pretty(&fixture).unwrap() + "\n"
 }
 

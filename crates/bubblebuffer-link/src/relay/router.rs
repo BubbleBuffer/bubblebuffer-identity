@@ -72,6 +72,7 @@ impl Drop for Connection {
 impl RelayRouter {
     pub fn new(config: RelayConfig) -> Result<Self> {
         config.limits.validate()?;
+        super::validate_origin(&config.origin)?;
         let (shutdown, _) = watch::channel(false);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -181,8 +182,9 @@ impl RelayRouter {
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let limits = &self.inner.config.limits;
-        let proof = admission::authenticate(&mut ws, limits).await?;
-        if !admission::permitted(policy.as_ref(), &proof) {
+        let (proof, target) =
+            admission::authenticate(&mut ws, limits, &self.inner.config.origin).await?;
+        if !admission::permitted(policy.as_ref(), &proof, target.as_ref()) {
             wire::send(&mut ws, &Wire::Reject, limits).await?;
             return Err(Error::AuthenticationFailed);
         }
@@ -201,7 +203,7 @@ impl RelayRouter {
             .attach(
                 role_byte,
                 proof.public_key,
-                proof.target.map(|id| id.to_string()).unwrap_or_default(),
+                target.map(|id| id.to_string()).unwrap_or_default(),
                 connection.id,
                 sender,
                 limits,

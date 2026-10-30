@@ -1,3 +1,5 @@
+const ORIGIN: &str = "https://relay.example.test";
+
 use bubblebuffer_link::{
     Error,
     device::{DeviceId, DeviceKey},
@@ -77,7 +79,7 @@ async fn mounted_route_binds_authenticated_account_to_verified_device_proof() {
         (bob_key.id(), "bob"),
     ]));
     let calls = Arc::new(AtomicUsize::new(0));
-    let router = RelayRouter::new(RelayConfig::default()).unwrap();
+    let router = RelayRouter::new(RelayConfig::new(ORIGIN)).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/relay", listener.local_addr().unwrap());
     let shared_router = router.clone();
@@ -137,17 +139,17 @@ async fn mounted_route_binds_authenticated_account_to_verified_device_proof() {
     // Owning an account session does not grant possession of another account's device.
     let wrong_account = authenticated_socket(&url, "Bearer fixture-bob", &limits).await;
     assert!(
-        relay::register_socket(wrong_account, &host_key, limits.clone())
+        relay::register_socket(wrong_account, ORIGIN, &host_key, limits.clone())
             .await
             .is_err()
     );
     let host_socket = authenticated_socket(&url, "Bearer fixture-alice", &limits).await;
-    let mut host = relay::register_socket(host_socket, &host_key, limits.clone())
+    let mut host = relay::register_socket(host_socket, ORIGIN, &host_key, limits.clone())
         .await
         .unwrap();
     let bob_socket = authenticated_socket(&url, "Bearer fixture-bob", &limits).await;
     assert!(
-        relay::connect_socket(bob_socket, &bob_key, &host_key.id(), limits.clone())
+        relay::connect_socket(bob_socket, ORIGIN, &bob_key, &host_key.id(), limits.clone())
             .await
             .is_err()
     );
@@ -155,7 +157,7 @@ async fn mounted_route_binds_authenticated_account_to_verified_device_proof() {
     let target = host_key.id();
     let (accepted, connected) = tokio::join!(
         host.accept(),
-        relay::connect_socket(alice_socket, &alice_key, &target, limits.clone())
+        relay::connect_socket(alice_socket, ORIGIN, &alice_key, &target, limits.clone())
     );
     let host_trusted = [alice_key.public_key()];
     let client_trusted = [host_key.public_key()];
@@ -201,11 +203,11 @@ async fn mounted_route_binds_authenticated_account_to_verified_device_proof() {
 async fn supplied_socket_path_enforces_configuration_ip_limits_and_shutdown() {
     let limits = Limits {
         connections_per_ip: 1,
-        ..Default::default()
+        ..Limits::default()
     };
     let router = RelayRouter::new(RelayConfig {
         limits: limits.clone(),
-        ..Default::default()
+        ..RelayConfig::new(ORIGIN)
     })
     .unwrap();
     let ip = "127.0.0.1".parse().unwrap();
@@ -249,7 +251,7 @@ async fn supplied_socket_path_enforces_configuration_ip_limits_and_shutdown() {
 
 #[tokio::test]
 async fn shutdown_interrupts_pending_upgrade_and_blocked_websocket_write() {
-    let relay = Relay::bind("127.0.0.1:0".parse().unwrap(), RelayConfig::default())
+    let relay = Relay::bind("127.0.0.1:0".parse().unwrap(), RelayConfig::new(ORIGIN))
         .await
         .unwrap();
     let _pending_upgrade = TcpStream::connect(relay.local_addr()).await.unwrap();
@@ -257,7 +259,7 @@ async fn shutdown_interrupts_pending_upgrade_and_blocked_websocket_write() {
         .await
         .unwrap();
 
-    let router = RelayRouter::new(RelayConfig::default()).unwrap();
+    let router = RelayRouter::new(RelayConfig::new(ORIGIN)).unwrap();
     let (server, mut client) = tokio::io::duplex(1);
     let socket =
         WebSocketStream::from_raw_socket(server, Role::Server, Some(router.websocket_config()))

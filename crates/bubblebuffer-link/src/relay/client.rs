@@ -7,6 +7,7 @@ use crate::{
     device::{DeviceId, DeviceKey},
     frame::FrameIo,
 };
+use bubblebuffer_device_key::{RelayRole, relay_proof_hash};
 use std::collections::HashMap;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -160,11 +161,13 @@ async fn open_socket(url: &str, limits: &Limits) -> Result<Socket> {
 
 async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
     mut ws: WebSocketStream<S>,
+    origin: &str,
     key: &DeviceKey,
     target: Option<&DeviceId>,
     limits: &Limits,
 ) -> Result<WebSocketStream<S>> {
     limits.validate()?;
+    super::validate_origin(origin)?;
     wire::validate_config(&ws, limits)?;
     let Wire::Challenge(challenge) = wire::recv(&mut ws, limits).await? else {
         return Err(Error::AuthenticationFailed);
@@ -175,7 +178,20 @@ async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
         wire::REGISTER
     };
     let target = target.map(ToString::to_string).unwrap_or_default();
-    let signature = key.sign(&wire::signed(&challenge, role, &target));
+    let proof_role = if role == wire::REGISTER {
+        RelayRole::Host
+    } else {
+        RelayRole::Viewer
+    };
+    let hash = relay_proof_hash(
+        wire::PROOF_LABEL,
+        proof_role,
+        origin,
+        &challenge,
+        key.id(),
+        &key.public_key(),
+    )?;
+    let signature = key.sign(&hash);
     wire::send(
         &mut ws,
         &Wire::Auth {
@@ -191,21 +207,25 @@ async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Register the device ID derived from `key` as a reachable host.
-pub async fn register(url: &str, key: &DeviceKey, limits: Limits) -> Result<Host> {
-    register_socket(open_socket(url, &limits).await?, key, limits).await
+/// `origin` must exactly match the relay configuration, independent of its URL.
+pub async fn register(url: &str, origin: &str, key: &DeviceKey, limits: Limits) -> Result<Host> {
+    super::validate_origin(origin)?;
+    register_socket(open_socket(url, &limits).await?, origin, key, limits).await
 }
 
 /// Register using a caller-created WebSocket whose HTTP upgrade may carry
 /// host-owned authentication headers/cookies. Credentials stay outside the URL.
+/// `origin` must exactly match the relay configuration.
 pub async fn register_socket<S>(
     ws: WebSocketStream<S>,
+    origin: &str,
     key: &DeviceKey,
     limits: Limits,
 ) -> Result<Host>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut ws = authenticate(ws, key, None, &limits).await?;
+    let mut ws = authenticate(ws, origin, key, None, &limits).await?;
     if !matches!(wire::recv(&mut ws, &limits).await?, Wire::Registered) {
         return Err(Error::AuthenticationFailed);
     }
@@ -230,18 +250,30 @@ where
 }
 
 /// Wait until the target host accepts a new independently routed session.
+/// `origin` must exactly match the relay configuration, independent of its URL.
 pub async fn connect(
     url: &str,
+    origin: &str,
     key: &DeviceKey,
     target: &DeviceId,
     limits: Limits,
 ) -> Result<RelaySession> {
-    connect_socket(open_socket(url, &limits).await?, key, target, limits).await
+    super::validate_origin(origin)?;
+    connect_socket(
+        open_socket(url, &limits).await?,
+        origin,
+        key,
+        target,
+        limits,
+    )
+    .await
 }
 
 /// Connect using a WebSocket upgraded by the embedding account/session client.
+/// `origin` must exactly match the relay configuration.
 pub async fn connect_socket<S>(
     ws: WebSocketStream<S>,
+    origin: &str,
     key: &DeviceKey,
     target: &DeviceId,
     limits: Limits,
@@ -249,7 +281,7 @@ pub async fn connect_socket<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut ws = authenticate(ws, key, Some(target), &limits).await?;
+    let mut ws = authenticate(ws, origin, key, Some(target), &limits).await?;
     let Wire::Connected(id, peer) = wire::recv(&mut ws, &limits).await? else {
         return Err(Error::AuthenticationFailed);
     };

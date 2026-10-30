@@ -59,11 +59,13 @@ impl std::fmt::Debug for PairingCode {
 }
 
 pub(super) fn normalize(input: &str) -> Result<Zeroizing<String>> {
-    if input.len() != 10 {
+    // Pairing codes accept human grouping separators. Device IDs have a
+    // different parser and deliberately do not share this normalization.
+    let symbols = input.bytes().filter(|byte| !matches!(*byte, b' ' | b'-'));
+    if symbols.clone().count() != 10 {
         return Err(Error::WrongCode);
     }
-    let normalized: String = input
-        .bytes()
+    let normalized: String = symbols
         .map(|b| match b.to_ascii_uppercase() {
             b'O' => '0',
             b'I' | b'L' => '1',
@@ -110,4 +112,39 @@ pub(super) fn comparison(handshake_hash: &[u8; 32]) -> String {
     let number =
         u32::from_be_bytes(hash[..4].try_into().expect("SHA256 has four bytes")) % 1_000_000;
     format!("{number:06}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize;
+    use crate::Error;
+
+    #[test]
+    fn pairing_codes_accept_grouping_spaces_case_and_crockford_aliases() {
+        for (supplied, expected) in [
+            ("0123456789", "0123456789"),
+            ("01234-56789", "0123456789"),
+            (" 01234 56789 ", "0123456789"),
+            ("o iL23-4567 8", "0112345678"),
+            ("oiL23 45678", "0112345678"),
+            ("ab cd-ef gh jk", "ABCDEFGHJK"),
+        ] {
+            assert_eq!(normalize(supplied).unwrap().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn pairing_codes_check_symbol_count_and_reject_other_whitespace() {
+        for supplied in [
+            "01234-5678",
+            "01234 567890",
+            "01234\t56789",
+            "01234\n56789",
+            "01234\u{a0}56789",
+            "01234_56789",
+            "01234U6789",
+        ] {
+            assert!(matches!(normalize(supplied), Err(Error::WrongCode)));
+        }
+    }
 }
