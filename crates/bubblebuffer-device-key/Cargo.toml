@@ -1,0 +1,21 @@
+[package]
+name = "bubblebuffer-device-key"
+description = "Portable device identities, protected key files and possession proofs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+base64 = "0.22"
+curve25519-dalek = "4"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+sha2 = "0.10.9"
+zeroize = { version = "1.9.0", features = ["alloc"] }
+
+[dev-dependencies]
+serde_json = "1"
